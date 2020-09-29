@@ -1,0 +1,472 @@
+---
+title: "Social Data Science Project Analysis"
+authors: "Andreas Opedal & Charlotte Out"
+date: "4/16/2020"
+output: html_document
+---
+
+```{r}
+# Load packages
+library(dplyr)
+library(syuzhet)
+library(WDI)
+library(tools)
+library(sentimentSetsR)
+```
+
+Before the sentiment and correlation analysis can be done a couple of pre-processing steps are needed.
+
+```{r}
+# Load and clean vegan tweet data
+
+vegan_data <- read.csv("vegan_tweets_final.csv")
+vegan_data <- select(vegan_data, -X)
+vegan_data$location <- unlist(lapply(vegan_data$location, as.character))
+vegan_data$country <- unlist(lapply(vegan_data$country, as.character))
+vegan_data$text <- unlist(lapply(vegan_data$text, as.character))
+vegan_data$lang <- unlist(lapply(vegan_data$lang, as.character))
+
+```
+
+
+```{r}
+# Change country strings to title case
+vegan_data$country <- toTitleCase(vegan_data$country)
+
+# Take a look at distribution of observations over countries
+
+vegan_data %>% 
+  group_by(country) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) -> vegan_country_groupings
+
+# View(vegan_country_groupings)
+
+```
+
+***
+Approach: Restrict ourselves to tweets in English
+
+
+```{r}
+# Check distribution of tweets in english
+
+vegan_data %>%
+  filter(lang == "en") -> eng_tweets
+
+eng_tweets %>% 
+  group_by(country) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) -> eng_tweets_by_country
+
+View(eng_tweets_by_country)
+
+# Set threshold to 100 observations
+
+eng_tweets_by_country %>%
+  filter(count >= 100) -> eng_tweets_by_country_filtered
+
+print(paste0("Observe that there are ", nrow(eng_tweets_by_country_filtered), " countries left"))
+
+eng_tweets %>%
+  filter(country %in% eng_tweets_by_country_filtered$country) -> eng_tweets
+
+```
+
+
+```{r}
+
+## Note that the Syuzhet scores are used for benchmarking only, not for analysis
+
+# get sentiments of tweets from Syuzhet and aggregate by country on average
+
+eng_tweets$Syuzhet <- get_sentiment(eng_tweets$text)
+
+eng_tweets %>%
+  group_by(country) %>%
+  summarize(vegsentiment_syuzhet = mean(Syuzhet)) -> eng_tweets_avg
+
+
+```
+
+
+```{r}
+
+# get sentiments of tweets from VADER and aggregate by country on average
+
+eng_tweets$VADER <- NA
+for (i in seq(1, nrow(eng_tweets)))
+{
+  eng_tweets$VADER[i] <- getVaderRuleBasedSentiment(eng_tweets$text[i], compound=T)
+}
+
+eng_tweets %>%
+  group_by(country) %>%
+  summarize(vegsentiment_vader = mean(VADER)) -> eng_tweets_avg_2
+
+#View(eng_tweets_avg_2)
+
+# Join with Syuzhet
+inner_join(eng_tweets_avg, eng_tweets_avg_2) -> eng_tweets_avg
+
+```
+
+
+```{r}
+
+eng_tweets_avg <- read.csv("vegan_sentiment_averages.csv")
+
+```
+
+Now load and pre-process GDP/capita, Future Orientation Index, Global Innovation Index, Human Development Index and Climate Change Performance Index. 
+
+Start with GDP/capita (corrected by PPP) which can be retrieved from the World Bank. Want to find the most recent year's data. (Note HDI index is also in the World Bank's database but had only NA values for recent years)
+
+```{r}
+# Search for gdp/capita
+gdpsearch <- WDIsearch(string = "gdp per capita")
+
+# Select "GDP per capita, PPP (constant 2011 international $)" ("NY.GDP.PCAP.PP.KD")
+(gdp <- gdpsearch[[7]])
+
+# Search for HDI
+# (hdisearch <- WDIsearch(string = "human development"))
+
+# Select "Human development index (HDI)", ("UNDP.HDI.XD")
+# (hdi <- hdisearch[[1]])
+
+# Now download data 
+WDIdf <- WDI(indicator = c(gdp), start = 2018, end = 2018)
+
+# Filter on countries in our data set
+
+WDIdf %>%
+  filter(country %in% eng_tweets_avg$country) -> WDIdf
+#View(WDIdf)
+
+# Note: assert that no countries are missing
+(nrow(WDIdf) == nrow(eng_tweets_avg))
+
+# Join on country
+inner_join(WDIdf, eng_tweets_avg) %>%
+  select(country, vegsentiment_syuzhet, vegsentiment_vader, NY.GDP.PCAP.PP.KD) %>%
+  rename(GDP_capita = NY.GDP.PCAP.PP.KD) -> agg_data
+
+# Compute Pearson correlation
+(obs_gdp <- cor(agg_data$vegsentiment_vader, agg_data$GDP_capita))
+
+```
+
+Now load HDI data
+
+```{r}
+
+hdi <- read.csv("Human Development Index (HDI).csv", sep = ";")
+#View(hdi)
+
+# Select only most recent data and filter on countries in our dataset
+hdi %>%
+  select(Country, X2018) %>%
+  filter(Country %in% eng_tweets_avg$country) %>%
+  rename(HDI = X2018) -> hdi
+
+# Assert that no country is missing
+(nrow(hdi) == nrow(eng_tweets_avg))
+
+# Join on country
+inner_join(agg_data, hdi, by = c("country" = "Country")) -> agg_data
+
+# Fix problems with data type
+agg_data$HDI <- unlist(lapply(agg_data$HDI, as.character))
+agg_data$HDI <- unlist(lapply(agg_data$HDI, as.double))
+
+# Compute Pearson correlation
+(obs_hdi <- cor(agg_data$vegsentiment_vader, agg_data$HDI))
+
+```
+
+Load GII data
+
+```{r}
+gii <- read.csv("Global Innovation Index.csv")
+
+#View(gii)
+
+gii %>%
+  select(Economy, Score) %>%
+  rename(country = Economy, GII = Score) -> gii
+
+gii$country <- unlist(lapply(gii$country, as.character))
+
+# Modify country names
+gii[gii$country == "Netherlands (the)",]$country <- "Netherlands"
+gii[gii$country == "United Kingdom (the)",]$country <- "United Kingdom"
+gii[gii$country == "United States of America (the)",]$country <- "United States"
+
+# Filter out countries
+gii %>% 
+  filter(country %in% agg_data$country) -> gii
+
+# Assert that no country is missing
+(nrow(gii) == nrow(eng_tweets_avg))
+
+# Join
+inner_join(agg_data, gii) -> agg_data
+
+# Compute Pearson correlation
+(obs_gii <- cor(agg_data$vegsentiment_vader, agg_data$GII))
+
+```
+
+Climate Change Performance Index
+
+```{r}
+CCPI <- read.csv("CCPI.csv", sep = ";")
+#View(CCPI)
+
+CCPI$country <- unlist(lapply(CCPI$country, as.character))
+
+# Filter out countries
+CCPI %>%
+  filter(country %in% agg_data$country) -> CCPI
+
+# Join 
+inner_join(agg_data, CCPI) -> agg_data
+
+# Compute Pearson correlation
+(obs_ccpi <- cor(agg_data$vegsentiment_vader, agg_data$CCPI))
+
+```
+
+Future Orientation Index
+
+```{r}
+# Load and pre-process
+GoogleDF <-read.csv("geoMap.csv", skip=2)
+names(GoogleDF) <- c("country", "G2018", "G2020")
+GoogleDF$G2018 <- as.numeric(sub("%", "", GoogleDF$G2018))
+GoogleDF$G2020 <- as.numeric(sub("%", "", GoogleDF$G2020))
+
+# Compute FOI
+GoogleDF$FOI <- GoogleDF$G2020/GoogleDF$G2018
+
+# Filter on countries in data set and remove unnecesarry columns
+GoogleDF %>%
+  filter(country %in% agg_data$country) %>%
+  select(country, FOI) -> GoogleDF
+
+# Assert no country is missing
+(nrow(GoogleDF) == nrow(eng_tweets_avg))
+
+# Join
+inner_join(agg_data, GoogleDF) -> agg_data
+
+# Compute Pearson correlation
+(obs_foi <- cor(agg_data$vegsentiment_vader, agg_data$FOI))
+
+```
+
+
+Now perform permutation tests to assess how plausible it is that our observations could have been produced by chance under null hypothesis of no correlation.
+
+Alternative hypothesis is as we recall a positive correlation for all factors. 
+
+
+```{r}
+# Permutation test for Pearson correlation
+
+nsim <- 1000
+gdpcor <- c()
+hdicor <- c()
+giicor <- c()
+ccpicor <- c()
+foicor <- c()
+for (i in seq(nsim)) {
+  shufdata <- agg_data[sample(nrow(agg_data)),]
+  gdpcor <- append(gdpcor, cor(shufdata$vegsentiment_vader, agg_data$GDP_capita))
+  hdicor <- append(hdicor, cor(shufdata$vegsentiment_vader, agg_data$HDI))
+  giicor <- append(giicor, cor(shufdata$vegsentiment_vader, agg_data$GII))
+  ccpicor <- append(ccpicor, cor(shufdata$vegsentiment_vader, agg_data$CCPI))
+  foicor <- append(foicor, cor(shufdata$vegsentiment_vader, agg_data$FOI))
+}
+
+```
+
+```{r}
+#Creating the histograms and calculating the p-values for the Pearson correlation coefficients 
+
+
+# GDP/capita
+hist(gdpcor,
+ xlim=range(c(gdpcor, obs_gdp)), freq = F, 
+ main = "Vegan sentiment and GDP/capita", xlab = "Pearson correlation coefficient")
+abline(v=obs_gdp, col="red")
+
+p_gdp <- (1 + sum(gdpcor >= obs_gdp)) / (length(gdpcor) + 1)
+
+print(paste0("The correlation coefficient between vegan sentiment and GDP/capita is: ", round(obs_gdp, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and GDP/capita is: ", round(p_gdp, digits = 4)))
+
+# HDI
+hist(hdicor,
+ xlim=range(c(hdicor, obs_hdi)), freq = F, 
+ main = "Vegan sentiment and HDI", xlab = "Pearson correlation coefficient")
+abline(v=obs_hdi, col="red")
+
+p_hdi <- (1 + sum(hdicor >= obs_hdi)) / (length(hdicor) + 1)
+
+print(paste0("The correlation coefficient between vegan sentiment and HDI is: ", round(obs_hdi, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and HDI is: ", round(p_hdi, digits = 4)))
+
+# GII
+hist(giicor,
+ xlim=range(c(giicor, obs_gii)), freq = F, 
+ main = "Vegan sentiment and GII", xlab = "Pearson correlation coefficient")
+abline(v=obs_gii, col="red")
+
+p_gii <- (1 + sum(giicor >= obs_gii)) / (length(giicor) + 1)
+
+print(paste0("The correlation coefficient between vegan sentiment and GII is: ", round(obs_gii, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and GII is: ", round(p_gii, digits = 4)))
+
+# CCPI
+hist(ccpicor,
+ xlim=range(c(ccpicor, obs_ccpi)), freq = F, 
+ main = "Vegan sentiment and Climate Change Performance", xlab = "Pearson correlation coefficient")
+abline(v=obs_ccpi, col="red")
+
+p_ccpi <- (1 + sum(ccpicor >= obs_ccpi)) / (length(ccpicor) + 1)
+
+print(paste0("The correlation coefficient between vegan sentiment and CCPI is: ", round(obs_ccpi, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and CCPI is: ", round(p_ccpi, digits = 4)))
+
+# FOI
+hist(foicor,
+ xlim=range(c(foicor, obs_foi)), freq = F, 
+ main = "Vegan sentiment and Future Orientation Index", xlab = "Pearson correlation coefficient")
+abline(v=obs_foi, col="red")
+
+p_foi <- (1 + sum(foicor >= obs_foi)) / (length(foicor) + 1)
+
+print(paste0("The correlation coefficient between vegan sentiment and FOI is: ", round(obs_foi, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and FOI is: ", round(p_foi, digits = 4)))
+```
+
+```{r}
+#Calculating spearman correlation coefficients 
+
+obs_GDP_S <- cor(agg_data$vegsentiment_vader, agg_data$GDP_capita, method = "spearman")
+obs_HDI_S <- cor(agg_data$vegsentiment_vader, agg_data$HDI, method = "spearman")
+obs_GII_S <- cor(agg_data$vegsentiment_vader, agg_data$GII, method = "spearman")
+obs_CCPI_S <- cor(agg_data$vegsentiment_vader, agg_data$CCPI, method = "spearman")
+obs_FOI_S <-  cor(agg_data$vegsentiment_vader, agg_data$FOI, method = "spearman")
+
+```
+
+```{r}
+# Permutation test using Spearman correlation coefficient 
+
+nsim <- 1000
+gdpcorS <- c()
+hdicorS <- c()
+giicorS <- c()
+ccpicorS <- c()
+foicorS <- c()
+for (i in seq(nsim)) {
+  shufdata <- agg_data[sample(nrow(agg_data)),]
+  gdpcorS <- append(gdpcorS, cor(shufdata$vegsentiment_vader, agg_data$GDP_capita, method = 'spearman'))
+  hdicorS <- append(hdicorS, cor(shufdata$vegsentiment_vader, agg_data$HDI, method = 'spearman'))
+  giicorS <- append(giicorS, cor(shufdata$vegsentiment_vader, agg_data$GII, method = 'spearman'))
+  ccpicorS <- append(ccpicorS, cor(shufdata$vegsentiment_vader, agg_data$CCPI, method = 'spearman'))
+  foicorS <- append(foicorS, cor(shufdata$vegsentiment_vader, agg_data$FOI, method = 'spearman'))
+}
+
+
+```
+
+
+
+```{r}
+#creating the histrograms and calculating the p-values for Spearman correlation
+#coefficient 
+
+
+# GDP/capita
+hist(gdpcorS,
+ xlim=range(c(gdpcorS, obs_GDP_S)), freq = F, 
+ main = "Vegan sentiment and GDP/capita", xlab = "Spearman correlation coefficient")
+abline(v=obs_GDP_S, col="red")
+
+p_gdpS <- (1 + sum(gdpcorS >= obs_GDP_S)) / (length(gdpcorS) + 1)
+
+print(paste0("The spearman correlation coefficient between vegan sentiment and GDP/capita is: ", round(obs_GDP_S, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and GDP/capita is: ", round(p_gdpS, digits = 4)))
+
+# HDI
+hist(hdicorS,
+ xlim=range(c(hdicorS, obs_HDI_S)), freq = F, 
+ main = "Vegan sentiment and HDI", xlab = "Spearman correlation coefficient")
+abline(v=obs_HDI_S, col="red")
+
+p_hdiS <- (1 + sum(hdicorS >= obs_HDI_S)) / (length(hdicorS) + 1)
+
+print(paste0("The spearman correlation coefficient between vegan sentiment and HDI is: ", round(obs_HDI_S, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and HDI is: ", round(p_hdiS, digits = 4)))
+
+# GII
+hist(giicorS,
+ xlim=range(c(giicorS, obs_GII_S)), freq = F, 
+ main = "Vegan sentiment and GII", xlab = "Spearman correlation coefficient")
+abline(v=obs_GII_S, col="red")
+
+p_giiS <- (1 + sum(giicorS >= obs_GII_S)) / (length(giicorS) + 1)
+
+print(paste0("The Spearman correlation coefficient between vegan sentiment and GII is: ", round(obs_GII_S, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and GII is: ", round(p_giiS, digits = 4)))
+
+# CCPI
+hist(ccpicorS,
+ xlim=range(c(ccpicorS, obs_CCPI_S)), freq = F, 
+ main = "Vegan sentiment and Climate Change Performance", xlab = "Spearman correlation coefficient")
+abline(v=obs_CCPI_S, col="red")
+
+p_ccpiS <- (1 + sum(ccpicorS >= obs_CCPI_S)) / (length(ccpicorS) + 1)
+
+print(paste0("The Spearman correlation coefficient between vegan sentiment and CCPI is: ", round(obs_CCPI_S, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and CCPI is: ", round(p_ccpiS, digits = 4)))
+
+# FOI
+hist(foicorS,
+ xlim=range(c(foicorS, obs_FOI_S)), freq = F, 
+ main = "Vegan sentiment and Future Orientation Index", xlab = "Spearman correlation coefficient")
+abline(v=obs_FOI_S, col="red")
+
+p_foiS <- (1 + sum(foicorS >= obs_FOI_S)) / (length(foicorS) + 1)
+
+print(paste0("The Spearman correlation coefficient between vegan sentiment and FOI is: ", round(obs_FOI_S, digits = 4)))
+print(paste0("The p-value of the correlation between vegan sentiment and FOI is: ", round(p_foiS, digits = 4)))
+
+
+```
+
+
+```{r}
+# Check Pearson correlations with median sentiment
+
+eng_tweets %>%
+  group_by(country) %>%
+  summarize(vegsentiment_vader_median = median(VADER)) -> eng_tweets_med
+
+inner_join(agg_data, eng_tweets_med) -> agg_data
+
+(cor(agg_data$vegsentiment_vader_median, agg_data$GDP_capita))
+(cor(agg_data$vegsentiment_vader_median, agg_data$HDI))
+(cor(agg_data$vegsentiment_vader_median, agg_data$GII))
+(cor(agg_data$vegsentiment_vader_median, agg_data$CCPI))
+(cor(agg_data$vegsentiment_vader_median, agg_data$FOI))
+
+```
+
+
+
+
