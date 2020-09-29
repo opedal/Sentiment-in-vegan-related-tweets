@@ -11,3 +11,5 @@ The project paper is also published in this repo.
 R libraries: dplyr, rtweet, sentimentSetsR, syuzhet, tools, WDI
 
 Python libraries: geopy, nltk, numpy, pandas, unicodedata
+
+Andreas Opedal & Charlotte Out
